@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""
+Push-to-talk voice input with global hotkey
+Hold INSERT to record, release to transcribe and auto-type
+"""
+import sounddevice as sd
+import numpy as np
+import whisper
+import tempfile
+import subprocess
+import sys
+import time
+from pynput import keyboard
+import threading
+import queue
+
+SAMPLE_RATE = 16000
+audio_queue = queue.Queue()
+recording = False
+audio_data = []
+model = None
+
+def load_model():
+    global model
+    print("Loading Whisper model...", file=sys.stderr)
+    model = whisper.load_model("base")
+    print("✅ Ready! Hold INSERT to speak", file=sys.stderr)
+
+def audio_callback(indata, frames, time, status):
+    if recording:
+        audio_queue.put(indata.copy())
+
+def start_recording():
+    global recording, audio_data
+    if not recording:
+        recording = True
+        audio_data = []
+        # Clear any stale audio from queue
+        while not audio_queue.empty():
+            try:
+                audio_queue.get_nowait()
+            except:
+                break
+        print("🔴 Recording...", file=sys.stderr)
+
+def stop_recording():
+    global recording, audio_data
+    if recording:
+        recording = False
+
+        # Collect audio from queue
+        while not audio_queue.empty():
+            try:
+                audio_data.append(audio_queue.get_nowait())
+            except:
+                break
+
+        if audio_data and len(audio_data) > 0:
+            print("⏳ Transcribing...", file=sys.stderr)
+            audio = np.concatenate(audio_data, axis=0)
+
+            # Only process if we have enough audio (at least 0.3 seconds)
+            if len(audio) > SAMPLE_RATE * 0.3:
+                # Save and transcribe
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
+                    import scipy.io.wavfile as wav
+                    wav.write(f.name, SAMPLE_RATE, (audio * 32767).astype(np.int16))
+                    result = model.transcribe(f.name)
+
+                text = result["text"].strip()
+                if text:
+                    print(f"📝 {text}", file=sys.stderr)
+                    # Type the text using xdotool
+                    subprocess.run(["xdotool", "type", "--delay", "0", text])
+            else:
+                print("⚠️ Recording too short", file=sys.stderr)
+        else:
+            print("⚠️ No audio captured", file=sys.stderr)
+
+def on_press(key):
+    if key == keyboard.Key.insert:
+        start_recording()
+
+def on_release(key):
+    if key == keyboard.Key.insert:
+        stop_recording()
+    elif key == keyboard.Key.esc:
+        print("👋 Exiting...", file=sys.stderr)
+        return False  # Stop listener
+
+# Load model in background
+threading.Thread(target=load_model, daemon=True).start()
+
+# Start audio stream
+stream = sd.InputStream(callback=audio_callback, channels=1, samplerate=SAMPLE_RATE)
+stream.start()
+
+# Start keyboard listener
+print("Starting voice hotkey... (ESC to quit)", file=sys.stderr)
+with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+    listener.join()
+
+stream.stop()
