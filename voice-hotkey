@@ -9,22 +9,46 @@ import whisper
 import tempfile
 import subprocess
 import sys
-import time
-from pynput import keyboard
+import shutil
 import threading
 import queue
+import argparse
 
 SAMPLE_RATE = 16000
 audio_queue = queue.Queue()
 recording = False
 audio_data = []
 model = None
+model_loaded = threading.Event()
 
-def load_model():
+def check_dependencies():
+    """Check that required system dependencies are available"""
+    if not shutil.which("xdotool"):
+        print("❌ Error: xdotool is not installed", file=sys.stderr)
+        print("   Install with: sudo apt install xdotool", file=sys.stderr)
+        sys.exit(1)
+
+    # Check for audio input device
+    try:
+        devices = sd.query_devices()
+        input_devices = [d for d in devices if d['max_input_channels'] > 0]
+        if not input_devices:
+            print("❌ Error: No microphone found", file=sys.stderr)
+            sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error checking audio devices: {e}", file=sys.stderr)
+        sys.exit(1)
+
+def load_model(model_name):
     global model
-    print("Loading Whisper model...", file=sys.stderr)
-    model = whisper.load_model("base")
-    print("✅ Ready! Hold INSERT to speak", file=sys.stderr)
+    print(f"Loading Whisper model '{model_name}'...", file=sys.stderr)
+    try:
+        model = whisper.load_model(model_name)
+        model_loaded.set()
+        print("✅ Ready! Hold INSERT to speak", file=sys.stderr)
+    except Exception as e:
+        print(f"❌ Error loading Whisper model: {e}", file=sys.stderr)
+        sys.exit(1)
 
 def audio_callback(indata, frames, time, status):
     if recording:
@@ -48,6 +72,11 @@ def stop_recording():
     if recording:
         recording = False
 
+        # Wait for model if not loaded yet
+        if not model_loaded.is_set():
+            print("⏳ Waiting for model to load...", file=sys.stderr)
+            model_loaded.wait()
+
         # Collect audio from queue
         while not audio_queue.empty():
             try:
@@ -62,42 +91,78 @@ def stop_recording():
             # Only process if we have enough audio (at least 0.3 seconds)
             if len(audio) > SAMPLE_RATE * 0.3:
                 # Save and transcribe
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
-                    import scipy.io.wavfile as wav
-                    wav.write(f.name, SAMPLE_RATE, (audio * 32767).astype(np.int16))
-                    result = model.transcribe(f.name)
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
+                        import scipy.io.wavfile as wav
+                        wav.write(f.name, SAMPLE_RATE, (audio * 32767).astype(np.int16))
+                        result = model.transcribe(f.name)
 
-                text = result["text"].strip()
-                if text:
-                    print(f"📝 {text}", file=sys.stderr)
-                    # Type the text using xdotool
-                    subprocess.run(["xdotool", "type", "--delay", "0", text])
+                    text = result["text"].strip()
+                    if text:
+                        print(f"📝 {text}", file=sys.stderr)
+                        # Type the text using xdotool
+                        subprocess.run(
+                            ["xdotool", "type", "--clearmodifiers", "--delay", "0", "--", text],
+                            check=True
+                        )
+                except subprocess.CalledProcessError as e:
+                    print(f"⚠️ Failed to type text: {e}", file=sys.stderr)
+                except Exception as e:
+                    print(f"⚠️ Transcription error: {e}", file=sys.stderr)
             else:
                 print("⚠️ Recording too short", file=sys.stderr)
         else:
             print("⚠️ No audio captured", file=sys.stderr)
 
-def on_press(key):
-    if key == keyboard.Key.insert:
-        start_recording()
+def main():
+    parser = argparse.ArgumentParser(description="Push-to-talk voice input")
+    parser.add_argument(
+        "--model", "-m",
+        choices=["tiny", "base", "small", "medium", "large"],
+        default="base",
+        help="Whisper model to use (default: base)"
+    )
+    args = parser.parse_args()
 
-def on_release(key):
-    if key == keyboard.Key.insert:
-        stop_recording()
-    elif key == keyboard.Key.esc:
-        print("👋 Exiting...", file=sys.stderr)
-        return False  # Stop listener
+    # Import here to avoid issues if pynput isn't installed
+    try:
+        from pynput import keyboard
+    except ImportError:
+        print("❌ Error: pynput is not installed", file=sys.stderr)
+        print("   Install with: pip install pynput", file=sys.stderr)
+        sys.exit(1)
 
-# Load model in background
-threading.Thread(target=load_model, daemon=True).start()
+    # Check dependencies before starting
+    check_dependencies()
 
-# Start audio stream
-stream = sd.InputStream(callback=audio_callback, channels=1, samplerate=SAMPLE_RATE)
-stream.start()
+    def on_press(key):
+        if key == keyboard.Key.insert:
+            start_recording()
 
-# Start keyboard listener
-print("Starting voice hotkey... (ESC to quit)", file=sys.stderr)
-with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-    listener.join()
+    def on_release(key):
+        if key == keyboard.Key.insert:
+            stop_recording()
+        elif key == keyboard.Key.esc:
+            print("👋 Exiting...", file=sys.stderr)
+            return False  # Stop listener
 
-stream.stop()
+    # Load model in background
+    threading.Thread(target=load_model, args=(args.model,), daemon=True).start()
+
+    # Start audio stream
+    try:
+        stream = sd.InputStream(callback=audio_callback, channels=1, samplerate=SAMPLE_RATE)
+        stream.start()
+    except Exception as e:
+        print(f"❌ Error starting audio stream: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Start keyboard listener
+    print("Starting voice hotkey... (ESC to quit)", file=sys.stderr)
+    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+        listener.join()
+
+    stream.stop()
+
+if __name__ == "__main__":
+    main()

@@ -40,13 +40,19 @@ cp voice-hotkey ~/.local/bin/
 
 ## Usage
 
-Run manually:
-
 ```bash
-voice-hotkey
+voice-hotkey [--model MODEL]
 ```
 
-Then:
+Options:
+- `--model`, `-m`: Whisper model to use (default: `base`)
+  - `tiny` - Fastest, least accurate (~1GB RAM)
+  - `base` - Good balance (~1GB RAM)
+  - `small` - Better accuracy (~2GB RAM)
+  - `medium` - High accuracy (~5GB RAM)
+  - `large` - Best accuracy (~10GB RAM)
+
+Controls:
 - **Hold INSERT** - starts recording
 - **Release INSERT** - transcribes and types the text at your cursor
 - **Press ESC** - quit
@@ -77,6 +83,12 @@ systemctl --user enable voice-hotkey
 systemctl --user start voice-hotkey
 ```
 
+To use a different model at startup, edit the service file and change the `ExecStart` line:
+
+```
+ExecStart=%h/.local/bin/voice-hotkey --model small
+```
+
 ### Useful Commands
 
 ```bash
@@ -94,12 +106,13 @@ systemctl --user start voice-hotkey
 systemctl --user disable voice-hotkey
 ```
 
-## Configuration
+## Customization
 
-Edit the script to change:
-
-- **Hotkey**: Change `keyboard.Key.insert` to another key (e.g., `keyboard.Key.f9`, `keyboard.Key.ctrl_r`)
-- **Whisper model**: Change `"base"` to `"tiny"` (faster, less accurate) or `"small"`/`"medium"`/`"large"` (slower, more accurate)
+To change the hotkey, edit the script and change `keyboard.Key.insert` to another key:
+- `keyboard.Key.f9`
+- `keyboard.Key.ctrl_r`
+- `keyboard.Key.scroll_lock`
+- etc.
 
 ## How It Works
 
